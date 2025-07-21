@@ -1,0 +1,1502 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cenit - Aula Virtual de Bachilleres</title>
+    <!-- Tailwind CSS CDN for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts for aesthetic consistency -->
+    <link href="https://fonts.googleapis.com/css2?family=Lora:wght@400;700&family=Merriweather:wght@700&display=swap" rel="stylesheet">
+    <!-- Firebase SDKs for authentication and database -->
+    <script type="module">
+        // Import necessary Firebase functions
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword, updatePassword } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, getDoc, setDoc, collection, query, where, getDocs, addDoc, deleteDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        // Import getAnalytics for Firebase Analytics
+        import { getAnalytics } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-analytics.js";
+
+        // Global variables for Firebase (provided by the environment)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        
+        // User's provided Firebase configuration (as a fallback)
+        const userProvidedFirebaseConfig = {
+            apiKey: "AIzaSyCtjrV4eIvW8YdxapFkaSan_XclNc4X19M",
+            authDomain: "cenit-4d688.firebaseapp.com",
+            projectId: "cenit-4d688",
+            storageBucket: "cenit-4d688.firebasestorage.app",
+            messagingSenderId: "726508003796",
+            appId: "1:726508003796:web:3f5db82a9f1ba3b36ef641",
+            measurementId: "G-5Q1Z42GSXB"
+        };
+        let firebaseConfig;
+        try {
+            const envFirebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+            // Check if envFirebaseConfig is not empty and has essential keys for Firebase Auth
+            if (Object.keys(envFirebaseConfig).length > 0 && envFirebaseConfig.apiKey && envFirebaseConfig.projectId && envFirebaseConfig.authDomain) {
+                firebaseConfig = envFirebaseConfig;
+                console.log("Using Firebase config from Canvas environment.");
+            } else {
+                // Fallback to user-provided config if environment config is invalid or empty
+                firebaseConfig = userProvidedFirebaseConfig;
+                console.log("Using user-provided Firebase config as fallback.");
+            }
+        } catch (e) {
+            console.error("Error parsing __firebase_config, falling back to user-provided config:", e);
+            firebaseConfig = userProvidedFirebaseConfig;
+        }
+
+        // Initialize Firebase app
+        const app = initializeApp(firebaseConfig);
+        // Initialize Firebase Analytics
+        const analytics = getAnalytics(app);
+        // Get Firestore and Auth instances
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+
+        // Global state variables for the application
+        let userId = null; // Stores the Firebase authenticated user ID
+        let isAuthReady = false; // Flag to indicate if Firebase Auth is initialized
+        let currentUserType = null; // Stores the type of the currently logged-in user
+        let currentUsername = null; // Stores the username (email) of the currently logged-in user
+        let currentUserData = null; // Stores all user data from Firestore
+        let currentProfessorSubject = null; // Stores the subject if the current user is a professor
+        let unreadNotificationsCount = 0; // Counter for unread notifications
+
+        // Listen for Firebase authentication state changes
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                // If a user is already authenticated
+                userId = user.uid;
+                console.log("Authenticated user ID:", userId);
+            } else {
+                // If no user is authenticated, try to sign in anonymously
+                try {
+                    // __initial_auth_token is provided by the Canvas environment for custom token sign-in
+                    if (typeof __initial_auth_token !== 'undefined') {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth); // Fallback to anonymous sign-in
+                    }
+                    userId = auth.currentUser.uid; // Get the user ID after sign-in
+                    console.log("Signed in anonymously. User ID:", userId);
+                } catch (error) {
+                    console.error("CRITICAL ERROR: Anonymous sign-in failed. Firestore operations may not work.", error);
+                    userId = null; // Reset userId if authentication fails
+                    isAuthReady = false; // Mark auth as not ready
+                    // Display a user-friendly error message if authentication fails
+                    window.showCustomAlert("Error crítico: No se pudo conectar al sistema de autenticación. Por favor, recarga la página.");
+                    return; // Stop further initialization that relies on Firestore
+                }
+            }
+            isAuthReady = true; // Mark Firebase Auth as ready
+            console.log("Firebase Auth Ready. User ID:", userId);
+            // Once Firebase Auth is ready, initialize page listeners and perform data migration
+            if (window.initializePageListeners) {
+                window.initializePageListeners();
+            }
+            if (userId) {
+                await checkAndMigrateDefaultUsers(); // Ensure default users exist in Firestore
+            }
+        });
+        // Expose Firebase instances and helper functions globally for easier access in the main script
+        window.firebaseApp = app;
+        window.firebaseDb = db;
+        window.firebaseAuth = auth;
+        window.getFirebaseUserId = () => userId;
+        window.isFirebaseAuthReady = () => isAuthReady;
+        window.firestoreDoc = doc;
+        window.firestoreGetDoc = getDoc;
+        window.firestoreSetDoc = setDoc;
+        window.firestoreCollection = collection;
+        window.firestoreQuery = query;
+        window.firestoreWhere = where;
+        window.firestoreGetDocs = getDocs;
+        window.firestoreAddDoc = addDoc;
+        window.firestoreDeleteDoc = deleteDoc;
+        window.firestoreOnSnapshot = onSnapshot; // Expose onSnapshot for real-time updates
+        window.signInWithEmailAndPassword = signInWithEmailAndPassword; // Expose for login
+        window.createUserWithEmailAndPassword = createUserWithEmailAndPassword; // Expose for account creation
+        window.updatePassword = updatePassword; // Expose for password updates
+
+        // Default user data for initial migration
+        const defaultValidUsers = {
+            'user1-6@cenit.com': {
+                password: 'pass', type: 'grade1-6', fullName: 'Estudiante Ejemplo 1', cedula: '12345678',
+                grades: { 'Matemáticas': { 'Tarea 1': '18/20', 'Examen Final': '85/100' }, 'Lengua y Literatura': { 'Ensayo': '15/20', 'Participación': '10/10' } },
+                schedule: [{ day: 'Lunes', time: '08:00-09:00', subject: 'Matemáticas', classroom: 'Aula 101' }]
+            },
+            'user1-2@cenit.com': {
+                password: 'pass', type: 'year1-2', fullName: 'Estudiante Ejemplo 2', cedula: '87654321',
+                grades: { 'Matemáticas': { 'Parcial 1': '75/100', 'Proyecto': '90/100' }, 'Biología': { 'Examen Final': '70/100' } },
+                schedule: [{ day: 'Martes', time: '09:00-10:00', subject: 'Biología', classroom: 'Laboratorio 2' }]
+            },
+            'user3-5@cenit.com': {
+                password: 'pass', type: 'year3-5', fullName: 'Estudiante Ejemplo 3', cedula: '11223344',
+                grades: { 'Biología': { 'Informe': '17/20', 'Presentación': '20/20' }, 'Física': { 'Problemas': '16/20' } },
+                schedule: [{ day: 'Miércoles', time: '08:00-09:00', subject: 'Castellano', classroom: 'Aula 302' }]
+            },
+            'profesorMatematicas@cenit.com': {
+                password: 'pass', type: 'professor', subject: 'Matemáticas', fullName: 'Profesor de Matemáticas', cedula: '55667788',
+                schedule: [{ day: 'Lunes', time: '08:00-09:00', class: '1-6 Grado', classroom: 'Aula 101' }],
+                students: { 'user1-6': { name: 'Estudiante 1-6', grades: { 'Matemáticas': '85%' } } }
+            },
+            'profesorFisica@cenit.com': {
+                password: 'pass', type: 'professor', subject: 'Física', fullName: 'Profesor de Física', cedula: '99887766',
+                schedule: [{ day: 'Martes', time: '14:00-15:00', class: '3-5 Año', classroom: 'Laboratorio 3' }],
+                students: { 'user3-5': { name: 'Estudiante 3-5', grades: { 'Física': '80%' } } }
+            },
+            'godadmin@cenit.com': { password: 'godpass', type: 'god_admin', fullName: 'Admin Maestro', cedula: '10203040' } // God Admin account
+        };
+        // Function to check and migrate default users to Firestore if the collection is empty
+        async function checkAndMigrateDefaultUsers() {
+            if (!window.isFirebaseAuthReady() || !window.getFirebaseUserId()) {
+                console.warn("Firebase Auth not ready or userId is null, delaying default user migration.");
+                return;
+            }
+
+            const usersCollectionRef = window.firestoreCollection(window.firebaseDb, `artifacts/${appId}/users/${userId}/user_data`);
+            const q = window.firestoreQuery(usersCollectionRef);
+            const querySnapshot = await window.firestoreGetDocs(q);
+
+            if (querySnapshot.empty) {
+                console.log("No users found in Firestore. Migrating default users...");
+                for (const email in defaultValidUsers) {
+                    const userData = defaultValidUsers[email];
+                    try {
+                        // Use Firebase Auth for user creation and Firestore for profile data
+                        const userCredential = await createUserWithEmailAndPassword(auth, email, userData.password);
+                        await window.firestoreSetDoc(window.firestoreDoc(usersCollectionRef, userCredential.user.uid), {
+                            email: email,
+                            type: userData.type,
+                            fullName: userData.fullName,
+                            cedula: userData.cedula,
+                            grades: userData.grades || {},
+                            schedule: userData.schedule || {},
+                            subject: userData.subject || null,
+                            students: userData.students || {}
+                        });
+                        console.log(`User ${email} migrated successfully.`);
+                    } catch (e) {
+                        console.error(`Error migrating user ${email}:`, e);
+                    }
+                }
+            } else {
+                console.log("Users already exist in Firestore. Skipping default user migration.");
+            }
+        }
+    </script>
+    <style>
+        /* Font configuration for the entire body */
+        body {
+            font-family: 'Lora', serif;
+        }
+        /* Font configuration for titles */
+        h1, h2, h3 {
+            font-family: 'Merriweather', serif;
+        }
+
+        /* Custom styles for CTA button for a more polished effect */
+        .cta-button-custom {
+            transition: background-color 0.3s ease, transform 0.2s ease;
+        }
+        .cta-button-custom:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+        }
+        /* Styles for login form for better spacing and appearance */
+        .login-form input[type="text"],
+        .login-form input[type="password"],
+        .login-form input[type="email"],
+        .login-form select,
+        .login-form textarea {
+            /* Ensure input fields take full width minus padding */
+            width: calc(100% - 2rem); /* 100% minus 2rem horizontal padding */
+        }
+        /* Styles for error/success messages */
+        .message-box {
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            text-align: center;
+            font-weight: bold;
+        }
+        .message-box.error {
+            background-color: #450a0a; /* Red-900 */
+            color: #fca5a5; /* Red-300 */
+            border: 1px solid #dc2626; /* Red-700 */
+        }
+        .message-box.success {
+            background-color: #064e3b; /* Green-900 */
+            color: #6ee7b7; /* Green-300 */
+            border: 1px solid #059669; /* Green-700 */
+        }
+        /* Styles for subject cards */
+        .course-card {
+            background-color: #374151; /* Gray-700 */
+            border-radius: 0.75rem; /* rounded-xl */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.15); /* shadow-md adjusted for dark */
+            overflow: hidden;
+            transition: transform 0.2s ease-in-out;
+            cursor: pointer; /* Indicates it's clickable */
+        }
+        .course-card:hover {
+            transform: translateY(-5px);
+        }
+        .course-card-header {
+            height: 100px; /* Fixed height for background image */
+            background-size: cover;
+            background-position: center;
+        }
+        /* Styles for dropdown menus */
+        .dropdown-menu {
+            position: absolute;
+            background-color: #374151; /* Gray-700 */
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            z-index: 10;
+            min-width: 180px; /* Increased to accommodate "Notifications" title */
+            right: 0; /* Align menu to the right of the button */
+            top: 100%; /* Place menu just below the button */
+            margin-top: 0.5rem; /* Space between button and menu */
+            padding: 0.5rem 0; /* Padding for menu content */
+        }
+        .dropdown-menu button {
+            display: block;
+            width: 100%;
+            padding: 0.75rem 1rem;
+            text-align: left;
+            color: #d1d5db; /* Gray-300 */
+            font-weight: normal;
+            transition: background-color 0.2s ease;
+        }
+        .dropdown-menu button:hover {
+            background-color: #4b5563; /* Gray-600 */
+        }
+        .dropdown-menu .menu-title {
+            padding: 0.75rem 1rem;
+            font-weight: bold;
+            color: #e5e7eb; /* Gray-200 */
+            border-bottom: 1px solid #4b5563; /* Gray-600 */
+            margin-bottom: 0.5rem;
+        }
+        .dropdown-menu .no-notifications {
+            padding: 0.75rem 1rem;
+            color: #9ca3af; /* Gray-400 */
+            font-style: italic;
+        }
+
+        /* Styles for the background of the home section */
+        #inicio {
+            background-image: linear-gradient(45deg, rgba(255,255,255,0.05) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.05) 75%, rgba(255,255,255,0.05)),
+                              linear-gradient(-45deg, rgba(255,255,255,0.05) 25%, transparent 25%, transparent 75%, rgba(255,255,255,0.05) 75%, rgba(255,255,255,0.05));
+            background-size: 40px 40px; /* Pattern size */
+            background-position: 0 0, 20px 20px; /* Offset for the second gradient */
+            padding: 2.5rem; /* Add padding for better background visibility */
+            border-radius: 0.75rem; /* Rounded corners */
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.15);
+        }
+
+        /* Style for notification counter */
+        .notification-count {
+            position: absolute;
+            top: -5px;
+            right: -5px;
+            background-color: #ef4444; /* Red */
+            color: white;
+            border-radius: 9999px; /* fully rounded */
+            padding: 0.1rem 0.5rem;
+            font-size: 0.75rem; /* text-xs */
+            font-weight: bold;
+            min-width: 1.25rem; /* Ensures minimum size for 1-digit numbers */
+            text-align: center;
+        }
+
+        /* Styles for subject page navigation bar */
+        .subject-nav {
+            border-bottom: 2px solid #f97316; /* Orange-500 for the bottom line */
+            padding-bottom: 0.5rem;
+            margin-bottom: 2rem;
+        }
+        .subject-nav .nav-button {
+            padding: 0.5rem 1rem;
+            color: #d1d5db; /* Gray-300 */
+            font-weight: bold;
+            transition: color 0.2s ease;
+            cursor: pointer;
+        }
+        .subject-nav .nav-button:hover {
+            color: #f97316; /* Orange-500 */
+        }
+        .subject-nav .nav-button.active {
+            color: #f97316; /* Orange-500 */
+            border-bottom: 2px solid #f97316; /* Orange-500 */
+        }
+        /* Styles for schedule table */
+        .schedule-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+        .schedule-table th, .schedule-table td {
+            border: 1px solid #4b5563; /* Gray-600 */
+            padding: 0.75rem;
+            text-align: left;
+        }
+        .schedule-table th {
+            background-color: #4b5563; /* Gray-600 */
+            color: #e5e7eb; /* Gray-200 */
+            font-weight: bold;
+        }
+        .schedule-table tr:nth-child(even) {
+            background-color: #374151; /* Gray-700 */
+        }
+        .schedule-table tr:hover {
+            background-color: #4b5563; /* Gray-600 */
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100">
+
+    <header class="bg-orange-700 text-white py-6 text-center shadow-md">
+        <a href="#" onclick="location.reload(); return false;" class="inline-block">
+            <img src="cenit.png" alt="Logo de Cenit" class="mx-auto h-20 mb-2">
+        </a>
+        <p class="text-xl md:text-2xl">Tu Aula Virtual para Bachilleres</p>
+    </header>
+
+    <!-- Main navigation bar -->
+    <nav id="main-nav" class="bg-gray-800 text-white py-3 shadow-lg">
+        <div class="container mx-auto flex justify-center space-x-8">
+            <a href="#inicio" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Inicio</a>
+            <a href="#login" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Iniciar Sesión</a>
+        </div>
+    </nav>
+
+    <!-- Main content wrapper -->
+    <div id="main-content-wrapper" class="container mx-auto my-8 p-6 bg-gray-800 rounded-lg shadow-xl">
+
+        <!-- Home Section -->
+        <section id="inicio" class="mb-10">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Bienvenido a Cenit</h2>
+            <p class="text-lg leading-relaxed mb-4 text-justify text-gray-200">Cenit es la plataforma educativa diseñada para apoyar a las <strong class="text-orange-400">escuelas de bachillerato</strong> en la implementación de una <strong class="text-orange-400">experiencia de aprendizaje virtual enriquecedora y dinámica</strong>. El nuevo texto de la página principal. <strong class="text-orange-400">espacio interactivo</strong> pensado para complementar la enseñanza presencial, ofrecer recursos adicionales y facilitar la comunicación entre estudiantes y profesores.</p>
+            <p class="text-lg leading-relaxed text-justify text-gray-200">En Cenit, creemos en la educación accesible y de calidad para todos los jóvenes bachilleres, preparándolos para un futuro exitoso. Explora nuestras secciones para conocer más sobre cómo podemos transformar la experiencia educativa en tu institución.</p>
+        </section>
+
+        <hr class="border-t-2 border-gray-700 my-10">
+
+        <!-- God Admin Code Entry Section -->
+        <section id="godAdminCodeEntry" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Acceso de Administrador Maestro</h2>
+            <div class="login-form max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <form id="godAdminCodeForm">
+                    <div class="mb-5">
+                        <label for="godAdminCode" class="block text-gray-200 text-sm font-bold mb-2">Código Maestro:</label>
+                        <input type="password" id="godAdminCode" name="godAdminCode" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300 cta-button-custom">
+                        Ingresar Código
+                    </button>
+                    <div id="godAdminCodeMessage" class="message-box hidden"></div>
+                </form>
+            </div>
+            <p class="text-center mt-6">
+                <button id="backToLoginFromGodAdminCode" class="text-orange-400 hover:underline focus:outline-none">Volver a Iniciar Sesión</button>
+            </p>
+        </section>
+
+        <!-- God Admin Login Section (shown after correct code) -->
+        <section id="godAdminLogin" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Iniciar Sesión como Administrador Maestro</h2>
+            <div class="login-form max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <form id="godAdminLoginForm">
+                    <div class="mb-5">
+                        <label for="godAdminEmail" class="block text-gray-200 text-sm font-bold mb-2">Gmail GodAdmin:</label>
+                        <input type="email" id="godAdminEmail" name="godAdminEmail" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-6">
+                        <label for="godAdminPassword" class="block text-gray-200 text-sm font-bold mb-2">Contraseña GodAdmin:</label>
+                        <input type="password" id="godAdminPassword" name="godAdminPassword" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 mb-3 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300 cta-button-custom">
+                        Iniciar Sesión GodAdmin
+                    </button>
+                    <div id="godAdminLoginMessage" class="message-box hidden"></div>
+                </form>
+            </div>
+            <p class="text-center mt-6">
+                <button id="backToGodAdminCodeFromLogin" class="text-orange-400 hover:underline focus:outline-none">Volver al Código Maestro</button>
+            </p>
+        </section>
+
+        <!-- Standard Login Section -->
+        <section id="login" class="mb-10">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Iniciar Sesión</h2>
+            <div class="login-form max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <form id="loginForm">
+                    <div class="mb-5">
+                        <label for="email" class="block text-gray-200 text-sm font-bold mb-2">Gmail:</label>
+                        <input type="email" id="email" name="email" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+
+                    <div class="mb-6">
+                        <label for="password" class="block text-gray-200 text-sm font-bold mb-2">Contraseña:</label>
+                        <input type="password" id="password" name="password" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 mb-3 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+
+                    <button type="submit"
+                            class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300 cta-button-custom">
+                        Iniciar Sesión
+                    </button>
+                    <div id="loginMessage" class="message-box hidden"></div>
+                </form>
+            </div>
+            <p class="text-center mt-6 text-gray-300">¿Olvidaste tu contraseña? <a href="#" class="text-orange-400 hover:underline">Haz clic aquí</a></p>
+            <p class="text-center mt-2 text-gray-300">¿No tienes una cuenta? Contacta a tu administrador escolar.</p>
+            <p class="text-center mt-2 text-gray-300">¿Eres un administrador y quieres crear una cuenta? <button id="adminAccessBtn" class="text-orange-400 hover:underline focus:outline-none">Haz clic aquí</button></p>
+            <!-- NEW: Button to access GodAdmin code entry -->
+            <p class="text-center mt-2 text-gray-300">¿Eres el administrador maestro? <button id="godAdminAccessEntryBtn" class="text-orange-400 hover:underline focus:outline-none">Haz clic aquí</button></p>
+        </section>
+
+        <!-- Admin Access Section (for creating accounts) -->
+        <section id="adminAccessSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Acceso de Administrador</h2>
+            <div class="login-form max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <form id="adminPasswordForm">
+                    <div class="mb-5">
+                        <label for="adminPassword" class="block text-gray-200 text-sm font-bold mb-2">Contraseña de Administrador:</label>
+                        <input type="password" id="adminPassword" name="adminPassword" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300 cta-button-custom">
+                        Acceder
+                    </button>
+                    <div id="adminMessage" class="message-box hidden"></div>
+                </form>
+            </div>
+        </section>
+
+        <!-- Account Creator Section (hidden by default) -->
+        <section id="accountCreatorSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Crear Nueva Cuenta</h2>
+            <div class="login-form max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <form id="createAccountForm">
+                    <div class="mb-4">
+                        <label for="fullName" class="block text-gray-200 text-sm font-bold mb-2">Nombre Completo:</label>
+                        <input type="text" id="fullName" name="fullName" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-4">
+                        <label for="cedulaIdentidad" class="block text-gray-200 text-sm font-bold mb-2">Cédula de Identidad Venezolana:</label>
+                        <input type="text" id="cedulaIdentidad" name="cedulaIdentidad" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-4">
+                        <label for="newAccountEmail" class="block text-gray-200 text-sm font-bold mb-2">Gmail:</label>
+                        <input type="email" id="newAccountEmail" name="newAccountEmail" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-4">
+                        <label for="newAccountPassword" class="block text-gray-200 text-sm font-bold mb-2">Contraseña:</label>
+                        <input type="password" id="newAccountPassword" name="newAccountPassword" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-4">
+                        <label for="confirmNewAccountPassword" class="block text-gray-200 text-sm font-bold mb-2">Confirmación de Contraseña:</label>
+                        <input type="password" id="confirmNewAccountPassword" name="confirmNewAccountPassword" required
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                    </div>
+                    <div class="mb-6">
+                        <label for="newUserType" class="block text-gray-200 text-sm font-bold mb-2">Tipo de Usuario:</label>
+                        <select id="newUserType" name="newUserType"
+                                class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                            <option value="grade1-6">Estudiante (1-6 Grado)</option>
+                            <option value="year1-2">Estudiante (1-2 Año)</option>
+                            <option value="year3-5">Estudiante (3-5 Año)</option>
+                            <option value="professor">Profesor</option>
+                        </select>
+                    </div>
+                    <div id="professorSubjectField" class="mb-6 hidden">
+                        <label for="newProfessorSubject" class="block text-gray-200 text-sm font-bold mb-2">Materia del Profesor:</label>
+                        <input type="text" id="newProfessorSubject" name="newProfessorSubject"
+                               class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent" placeholder="Ej: Matemáticas">
+                    </div>
+                    <button type="submit"
+                            class="w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-3 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300 cta-button-custom">
+                        Crear Cuenta
+                    </button>
+                    <div id="createAccountMessage" class="message-box hidden"></div>
+                </form>
+            </div>
+            <p class="text-center mt-6">
+                <button id="backToLoginFromAdmin" class="text-orange-400 hover:underline focus:outline-none">Volver a Iniciar Sesión</button>
+            </p>
+        </section>
+
+        <!-- God Admin Panel Section -->
+        <section id="godAdminPanelSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Panel de Administrador Maestro</h2>
+            <div class="max-w-4xl mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <div id="userListContainer">
+                    <!-- User list will be rendered here -->
+                    <p class="text-gray-300 text-center">Cargando usuarios...</p>
+                </div>
+                <div class="text-center mt-6">
+                    <button id="backToLoginFromGodAdmin" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Cerrar Sesión Maestra </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- User Profile Section -->
+        <section id="userProfileSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Mi Perfil</h2>
+            <div class="max-w-md mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <div class="mb-4">
+                    <p class="text-gray-200 text-sm font-bold mb-2">Nombre Completo:</p>
+                    <p id="profileFullName" class="text-gray-100 text-lg bg-gray-600 p-3 rounded-md"></p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-gray-200 text-sm font-bold mb-2">Cédula de Identidad:</p>
+                    <p id="profileCedula" class="text-gray-100 text-lg bg-gray-600 p-3 rounded-md"></p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-gray-200 text-sm font-bold mb-2">Gmail:</p>
+                    <p id="profileEmail" class="text-gray-100 text-lg bg-gray-600 p-3 rounded-md"></p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-gray-200 text-sm font-bold mb-2">Tipo de Usuario:</p>
+                    <p id="profileUserType" class="text-gray-100 text-lg bg-gray-600 p-3 rounded-md"></p>
+                </div>
+                <div class="mb-4">
+                    <p class="text-gray-200 text-sm font-bold mb-2">Contraseña Actual:</p>
+                    <div class="flex items-center">
+                        <input type="password" id="profilePassword" class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent" readonly>
+                        <button id="togglePasswordBtn" class="ml-2 bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-3 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Mostrar </button>
+                    </div>
+                </div>
+                <div class="mb-4">
+                    <label for="newProfilePassword" class="block text-gray-200 text-sm font-bold mb-2">Nueva Contraseña:</label>
+                    <input type="password" id="newProfilePassword" class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                </div>
+                <div class="mb-6">
+                    <label for="confirmNewProfilePassword" class="block text-gray-200 text-sm font-bold mb-2">Confirmar Nueva Contraseña:</label>
+                    <input type="password" id="confirmNewProfilePassword" class="shadow appearance-none border rounded w-full py-3 px-4 bg-gray-600 text-gray-100 leading-tight focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent">
+                </div>
+                <div class="text-center mt-6">
+                    <button id="changePasswordBtn" class="bg-orange-600 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Cambiar Contraseña </button>
+                    <div id="passwordChangeMessage" class="message-box hidden mt-4"></div>
+                </div>
+                <div class="text-center mt-6">
+                    <button id="backToMisMateriasFromProfileBtn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Volver a Mis Materias </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- User Schedule Section -->
+        <section id="userScheduleSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Mi Horario</h2>
+            <div class="max-w-3xl mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <div id="scheduleContent">
+                    <!-- Schedule will be injected here -->
+                </div>
+                <div class="text-center mt-6">
+                    <button id="backToMisMateriasFromScheduleBtn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Volver a Mis Materias </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Detailed Grades Section (for students) -->
+        <section id="detailedGradesSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Notas de <span id="detailedGradesSubjectName"></span></h2>
+            <div class="max-w-3xl mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <div id="detailedGradesContent">
+                    <!-- Detailed grades will be injected here -->
+                </div>
+                <div class="text-center mt-6">
+                    <button id="backToMisMateriasFromDetailedGradesBtn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Volver a Mis Materias </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Student Grades Section (for professors) -->
+        <section id="professorGradesSection" class="mb-10 hidden">
+            <h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Notas de Mis Estudiantes</h2>
+            <div class="max-w-4xl mx-auto p-8 border border-gray-700 rounded-lg bg-gray-700 shadow-lg">
+                <div id="professorGradesContent">
+                    <!-- Student grades will be injected here -->
+                </div>
+                <div class="text-center mt-6">
+                    <button id="backToMisMateriasFromProfessorGradesBtn" class="bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Volver a Mis Materias </button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Container for "My Subjects" content when user is logged in -->
+        <div id="loggedInContent" class="hidden">
+            <!-- "My Subjects" content will be injected here -->
+        </div>
+    </div>
+
+    <!-- Modal for grades subject selection (students) -->
+    <div id="gradesSubjectSelectionModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50 hidden">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm mx-auto text-center">
+            <h3 class="text-2xl font-semibold text-orange-500 mb-4">Selecciona una Materia</h3>
+            <div id="gradesSubjectList" class="grid grid-cols-1 gap-4">
+                <!-- Subject buttons will be injected here -->
+            </div>
+            <button id="closeGradesSubjectSelectionModalBtn" class="mt-6 bg-gray-600 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300"> Cerrar </button>
+        </div>
+    </div>
+
+    <!-- Custom Alert/Confirm Modal -->
+    <div id="customAlertModal" class="fixed inset-0 bg-gray-900 bg-opacity-75 flex items-center justify-center z-50 hidden">
+        <div class="bg-gray-800 p-6 rounded-lg shadow-xl max-w-sm mx-auto text-center">
+            <p id="customAlertMessage" class="text-gray-200 text-lg mb-4"></p>
+            <div id="customAlertButtons">
+                <!-- Buttons will be injected here -->
+            </div>
+        </div>
+    </div>
+
+    <footer class="text-center py-6 bg-gray-900 text-gray-400">
+        <p>&copy; 2024 Cenit - Aula Virtual de Bachilleres. Todos los derechos reservados.</p>
+    </footer>
+
+    <script type="module">
+        // DOM elements
+        const mainContentWrapper = document.getElementById('main-content-wrapper');
+        const mainNav = document.getElementById('main-nav');
+        const inicioSection = document.getElementById('inicio');
+        const loginSection = document.getElementById('login');
+        const godAdminCodeEntrySection = document.getElementById('godAdminCodeEntry');
+        const godAdminLoginSection = document.getElementById('godAdminLogin');
+        const adminAccessSection = document.getElementById('adminAccessSection');
+        const accountCreatorSection = document.getElementById('accountCreatorSection');
+        const godAdminPanelSection = document.getElementById('godAdminPanelSection');
+        const userProfileSection = document.getElementById('userProfileSection');
+        const userScheduleSection = document.getElementById('userScheduleSection');
+        const detailedGradesSection = document.getElementById('detailedGradesSection');
+        const professorGradesSection = document.getElementById('professorGradesSection');
+        const loggedInContent = document.getElementById('loggedInContent');
+        const gradesSubjectSelectionModal = document.getElementById('gradesSubjectSelectionModal');
+        const gradesSubjectList = document.getElementById('gradesSubjectList');
+        const detailedGradesSubjectName = document.getElementById('detailedGradesSubjectName');
+        const detailedGradesContent = document.getElementById('detailedGradesContent');
+        const professorGradesContent = document.getElementById('professorGradesContent');
+        const userListContainer = document.getElementById('userListContainer');
+        const customAlertModal = document.getElementById('customAlertModal');
+        const customAlertMessage = document.getElementById('customAlertMessage');
+        const customAlertButtons = document.getElementById('customAlertButtons');
+
+        // Login Form Elements
+        const loginForm = document.getElementById('loginForm');
+        const emailInput = document.getElementById('email');
+        const passwordInput = document.getElementById('password');
+        const loginMessage = document.getElementById('loginMessage');
+
+        // God Admin Forms
+        const godAdminCodeForm = document.getElementById('godAdminCodeForm');
+        const godAdminCodeInput = document.getElementById('godAdminCode');
+        const godAdminCodeMessage = document.getElementById('godAdminCodeMessage');
+        const godAdminLoginForm = document.getElementById('godAdminLoginForm');
+        const godAdminEmailInput = document.getElementById('godAdminEmail'); // Changed from username to email
+        const godAdminPasswordInput = document.getElementById('godAdminPassword');
+        const godAdminLoginMessage = document.getElementById('godAdminLoginMessage');
+
+        // Admin Access Form
+        const adminPasswordForm = document.getElementById('adminPasswordForm');
+        const adminPasswordInput = document.getElementById('adminPassword');
+        const adminMessage = document.getElementById('adminMessage');
+
+        // Account Creator Form Elements
+        const createAccountForm = document.getElementById('createAccountForm');
+        const fullNameInput = document.getElementById('fullName');
+        const cedulaIdentidadInput = document.getElementById('cedulaIdentidad');
+        const newAccountEmailInput = document.getElementById('newAccountEmail');
+        const newAccountPasswordInput = document.getElementById('newAccountPassword');
+        const confirmNewAccountPasswordInput = document.getElementById('confirmNewAccountPassword');
+        const newUserTypeSelect = document.getElementById('newUserType');
+        const professorSubjectField = document.getElementById('professorSubjectField');
+        const newProfessorSubjectInput = document.getElementById('newProfessorSubject');
+        const createAccountMessage = document.getElementById('createAccountMessage');
+
+        // Profile Section Elements
+        const profileFullName = document.getElementById('profileFullName');
+        const profileCedula = document.getElementById('profileCedula');
+        const profileEmail = document.getElementById('profileEmail');
+        const profileUserType = document.getElementById('profileUserType');
+        const profilePassword = document.getElementById('profilePassword');
+        const togglePasswordBtn = document.getElementById('togglePasswordBtn');
+        const newProfilePasswordInput = document.getElementById('newProfilePassword');
+        const confirmNewProfilePasswordInput = document.getElementById('confirmNewProfilePassword');
+        const changePasswordBtn = document.getElementById('changePasswordBtn');
+        const passwordChangeMessage = document.getElementById('passwordChangeMessage');
+
+        // Back Buttons
+        const backToLoginFromGodAdminCodeBtn = document.getElementById('backToLoginFromGodAdminCode');
+        const backToGodAdminCodeFromLoginBtn = document.getElementById('backToGodAdminCodeFromLogin');
+        const backToLoginFromAdminBtn = document.getElementById('backToLoginFromAdmin');
+        const backToLoginFromGodAdminBtn = document.getElementById('backToLoginFromGodAdmin');
+        const backToMisMateriasFromProfileBtn = document.getElementById('backToMisMateriasFromProfileBtn');
+        const backToMisMateriasFromScheduleBtn = document.getElementById('backToMisMateriasFromScheduleBtn');
+        const backToMisMateriasFromDetailedGradesBtn = document.getElementById('backToMisMateriasFromDetailedGradesBtn');
+        const backToMisMateriasFromProfessorGradesBtn = document.getElementById('backToMisMateriasFromProfessorGradesBtn');
+        const closeGradesSubjectSelectionModalBtn = document.getElementById('closeGradesSubjectSelectionModalBtn');
+
+        // Global state from Firebase module
+        const auth = window.firebaseAuth;
+        const db = window.firebaseDb;
+        const getFirebaseUserId = window.getFirebaseUserId;
+        const isFirebaseAuthReady = window.isFirebaseAuthReady;
+        const firestoreDoc = window.firestoreDoc;
+        const firestoreGetDoc = window.firestoreGetDoc;
+        const firestoreSetDoc = window.firestoreSetDoc;
+        const firestoreCollection = window.firestoreCollection;
+        const firestoreQuery = window.firestoreQuery;
+        const firestoreWhere = window.firestoreWhere;
+        const firestoreGetDocs = window.firestoreGetDocs;
+        const firestoreAddDoc = window.firestoreAddDoc;
+        const firestoreDeleteDoc = window.firestoreDeleteDoc;
+        const firestoreOnSnapshot = window.firestoreOnSnapshot;
+        const signInWithEmailAndPassword = window.signInWithEmailAndPassword;
+        const createUserWithEmailAndPassword = window.createUserWithEmailAndPassword;
+        const updatePassword = window.updatePassword;
+
+        let currentUserType = null; // Stores the type of the currently logged-in user
+        let currentUsername = null; // Stores the username (email) of the currently logged-in user
+        let currentUserData = null; // Stores all user data from Firestore
+        let currentProfessorSubject = null; // Stores the subject if the current user is a professor
+
+        // --- Utility Functions ---
+        function hideAllSections() {
+            inicioSection.classList.add('hidden');
+            loginSection.classList.add('hidden');
+            godAdminCodeEntrySection.classList.add('hidden');
+            godAdminLoginSection.classList.add('hidden');
+            adminAccessSection.classList.add('hidden');
+            accountCreatorSection.classList.add('hidden');
+            godAdminPanelSection.classList.add('hidden');
+            userProfileSection.classList.add('hidden');
+            userScheduleSection.classList.add('hidden');
+            detailedGradesSection.classList.add('hidden');
+            professorGradesSection.classList.add('hidden');
+            loggedInContent.classList.add('hidden'); // Hide the logged-in content area
+            gradesSubjectSelectionModal.classList.add('hidden'); // Hide the grades selection modal
+            customAlertModal.classList.add('hidden'); // Hide custom alert modal
+        }
+
+        /**
+         * Displays a message in a designated element.
+         * @param {HTMLElement} element - The DOM element to display the message in.
+         * @param {string} message - The message text.
+         * @param {'success' | 'error'} type - The type of message (for styling).
+         */
+        function showMessage(element, message, type) {
+            element.textContent = message;
+            element.classList.remove('hidden', 'error', 'success');
+            element.classList.add(type);
+        }
+
+        /**
+         * Hides a message element.
+         * @param {HTMLElement} element - The DOM element to hide.
+         */
+        function clearMessage(element) {
+            element.textContent = '';
+            element.classList.add('hidden');
+            element.classList.remove('error', 'success');
+        }
+
+        /**
+         * Displays a custom alert modal.
+         * @param {string} message - The message to display.
+         * @param {string} type - 'info', 'success', 'error'.
+         * @param {Array<Object>} buttons - Array of button objects { text: string, action: function }.
+         */
+        window.showCustomAlert = (message, type = 'info', buttons = [{ text: 'OK', action: null }]) => {
+            customAlertMessage.textContent = message;
+            customAlertButtons.innerHTML = ''; // Clear previous buttons
+
+            buttons.forEach(btn => {
+                const buttonElement = document.createElement('button');
+                buttonElement.textContent = btn.text;
+                buttonElement.className = 'bg-orange-600 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded-md mx-2 focus:outline-none focus:shadow-outline transition duration-300';
+                buttonElement.onclick = () => {
+                    customAlertModal.classList.add('hidden');
+                    if (btn.action) {
+                        btn.action();
+                    }
+                };
+                customAlertButtons.appendChild(buttonElement);
+            });
+            customAlertModal.classList.remove('hidden');
+        };
+
+        // --- Navigation and View Management ---
+        function updateMainNavBar(state) {
+            if (state === 'loggedIn') {
+                mainNav.innerHTML = `
+                    <div class="container mx-auto flex justify-center space-x-8">
+                        <button id="navMisMaterias" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Mis Materias</button>
+                        <button id="navMiHorario" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Mi Horario</button>
+                        ${currentUserType !== 'god_admin' ? `<button id="navMiPerfil" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Mi Perfil</button>` : ''}
+                        ${currentUserType === 'professor' ? `<button id="navNotasEstudiantes" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Notas Estudiantes</button>` : ''}
+                        ${currentUserType === 'god_admin' ? `<button id="navAdminPanel" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Panel Admin</button>` : ''}
+                        <button id="navCerrarSesion" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Cerrar Sesión</button>
+                    </div>
+                `;
+                // Add event listeners for new navigation buttons
+                document.getElementById('navMisMaterias').onclick = () => showMisMaterias();
+                document.getElementById('navMiHorario').onclick = () => showMiHorario();
+                if (currentUserType !== 'god_admin') {
+                    document.getElementById('navMiPerfil').onclick = () => showUserProfile();
+                }
+                if (currentUserType === 'professor') {
+                    document.getElementById('navNotasEstudiantes').onclick = () => showProfessorGrades();
+                }
+                if (currentUserType === 'god_admin') {
+                    document.getElementById('navAdminPanel').onclick = () => showGodAdminPanel();
+                }
+                document.getElementById('navCerrarSesion').onclick = () => handleLogout();
+            } else { // loggedOut state
+                mainNav.innerHTML = `
+                    <div class="container mx-auto flex justify-center space-x-8">
+                        <a href="#inicio" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Inicio</a>
+                        <a href="#login" class="text-lg px-4 py-2 rounded-md hover:bg-gray-700 transition duration-300">Iniciar Sesión</a>
+                    </div>
+                `;
+                document.querySelectorAll('#main-nav a').forEach(link => {
+                    link.onclick = (e) => {
+                        e.preventDefault();
+                        const targetId = link.getAttribute('href').substring(1);
+                        hideAllSections();
+                        if (targetId === 'inicio') {
+                            inicioSection.classList.remove('hidden');
+                            loginSection.classList.remove('hidden'); // Show login on initial page load as well
+                        } else if (targetId === 'login') {
+                            loginSection.classList.remove('hidden');
+                            // Ensure initial sections like "Inicio" are hidden when navigating directly to login
+                            inicioSection.classList.add('hidden');
+                        }
+                    };
+                });
+            }
+        }
+
+        /**
+         * Fetches user data from Firestore based on UID.
+         * @param {string} uid - The Firebase User ID.
+         * @returns {Promise<Object|null>} - User data or null if not found.
+         */
+        async function fetchUserData(uid) {
+            const userDocRef = firestoreDoc(firestoreCollection(db, `artifacts/${window.appId}/users/${uid}/user_data`), uid);
+            const userDocSnap = await firestoreGetDoc(userDocRef);
+            if (userDocSnap.exists()) {
+                return { id: userDocSnap.id, ...userDocSnap.data() };
+            }
+            return null;
+        }
+
+        /**
+         * Displays content for logged-in users.
+         * @param {Object} userData - The data of the currently logged-in user.
+         */
+        async function showLoggedInContent(userData) {
+            hideAllSections();
+            loggedInContent.classList.remove('hidden');
+            currentUserType = userData.type;
+            currentUsername = userData.email; // Use email as username
+            currentProfessorSubject = userData.subject || null;
+            currentUserData = userData; // Store fetched user data globally
+
+            updateMainNavBar('loggedIn'); // Update navigation bar for logged-in state
+            showMisMaterias(); // Default view after login
+        }
+
+        /**
+         * Displays the "Mis Materias" section.
+         */
+        function showMisMaterias() {
+            hideAllSections();
+            loggedInContent.classList.remove('hidden');
+            loggedInContent.innerHTML = `<h2 class="text-3xl font-semibold text-orange-500 text-center mb-6">Mis Materias</h2>`;
+            const subjectsContainer = document.createElement('div');
+            subjectsContainer.className = 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6';
+            loggedInContent.appendChild(subjectsContainer);
+
+            let subjectsToDisplay = [];
+            if (currentUserType === 'grade1-6' || currentUserType === 'year1-2' || currentUserType === 'year3-5') {
+                subjectsToDisplay = Object.keys(currentUserData.grades || {});
+            } else if (currentUserType === 'professor') {
+                subjectsToDisplay = [currentUserData.subject]; // Professor only sees their subject
+            }
+
+            if (subjectsToDisplay.length > 0) {
+                subjectsToDisplay.forEach(subject => {
+                    const card = document.createElement('div');
+                    card.className = 'course-card';
+                    card.innerHTML = `
+                        <div class="course-card-header bg-cover bg-center" style="background-image: url('https://placehold.co/400x100/374151/F97316?text=${encodeURIComponent(subject)}')"></div>
+                        <div class="p-6">
+                            <h3 class="text-xl font-bold text-orange-500 mb-2">${subject}</h3>
+                            <p class="text-gray-300">${currentUserType.includes('Estudiante') ? 'Accede a tus notas y recursos.' : 'Gestiona tus estudiantes y notas.'}</p>
+                            <button class="mt-4 w-full bg-orange-600 hover:bg-orange-700 text-white font-bold py-2 px-4 rounded-md focus:outline-none focus:shadow-outline transition duration-300">
+                                Ver Detalles
+                            </button>
+                        </div>
+                    `;
+                    card.querySelector('button').onclick = () => {
+                        if (currentUserType.includes('Estudiante')) {
+                            showDetailedGrades(subject);
+                        } else if (currentUserType === 'professor') {
+                            // For professors, clicking "Ver Detalles" on a subject card could lead to a subject management page
+                            // For this example, we'll just show a generic alert.
+                            window.showCustomAlert(`Detalles de la materia ${subject} para el profesor. (Funcionalidad avanzada no implementada)`, 'info');
+                        }
+                    };
+                    subjectsContainer.appendChild(card);
+                });
+            } else {
+                subjectsContainer.innerHTML = `<p class="text-center text-gray-400">No hay materias disponibles.</p>`;
+            }
+        }
+
+        /**
+         * Displays the user's schedule section.
+         */
+        function showMiHorario() {
+            hideAllSections();
+            userScheduleSection.classList.remove('hidden');
+            const scheduleContent = document.getElementById('scheduleContent');
+            scheduleContent.innerHTML = ''; // Clear previous content
+
+            if (currentUserData && currentUserData.schedule && currentUserData.schedule.length > 0) {
+                const table = document.createElement('table');
+                table.className = 'schedule-table';
+                table.innerHTML = `
+                    <thead>
+                        <tr>
+                            <th>Día</th>
+                            <th>Hora</th>
+                            <th>Materia/Clase</th>
+                            <th>Aula</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    </tbody>
+                `;
+                const tbody = table.querySelector('tbody');
+                currentUserData.schedule.forEach(item => {
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${item.day}</td>
+                        <td>${item.time}</td>
+                        <td>${item.subject || item.class}</td>
+                        <td>${item.classroom}</td>
+                    `;
+                    tbody.appendChild(row);
+                });
+                scheduleContent.appendChild(table);
+            } else {
+                scheduleContent.innerHTML = `<p class="text-center text-gray-400">No hay horario disponible.</p>`;
+            }
+        }
+
+        /**
+         * Displays the user profile section.
+         */
+        async function showUserProfile() {
+            hideAllSections();
+            userProfileSection.classList.remove('hidden');
+            if (currentUserData) {
+                profileFullName.textContent = currentUserData.fullName || 'N/A';
+                profileCedula.textContent = currentUserData.cedula || 'N/A';
+                profileEmail.textContent = currentUserData.email || 'N/A';
+                profileUserType.textContent = currentUserData.type;
+                profilePassword.value = "********"; // Mask password
+                profilePassword.dataset.masked = "true";
+            }
+        }
+        
+        /**
+         * Displays detailed grades for a specific subject for a student.
+         * @param {string} subject - The name of the subject.
+         */
+        function showDetailedGrades(subject) {
+            hideAllSections();
+            detailedGradesSection.classList.remove('hidden');
+            detailedGradesSubjectName.textContent = subject;
+            detailedGradesContent.innerHTML = ''; // Clear previous content
+
+            if (currentUserData && currentUserData.grades && currentUserData.grades[subject]) {
+                const grades = currentUserData.grades[subject];
+                const ul = document.createElement('ul');
+                ul.className = 'list-disc list-inside text-gray-200';
+                for (const assignment in grades) {
+                    const li = document.createElement('li');
+                    li.textContent = `${assignment}: ${grades[assignment]}`;
+                    ul.appendChild(li);
+                }
+                detailedGradesContent.appendChild(ul);
+            } else {
+                detailedGradesContent.innerHTML = `<p class="text-center text-gray-400">No hay notas disponibles para ${subject}.</p>`;
+            }
+        }
+
+        /**
+         * Displays all student grades for a professor.
+         */
+        function showProfessorGrades() {
+            hideAllSections();
+            professorGradesSection.classList.remove('hidden');
+            professorGradesContent.innerHTML = ''; // Clear previous content
+
+            if (currentUserData && currentUserData.students) {
+                const students = currentUserData.students;
+                if (Object.keys(students).length > 0) {
+                    const ul = document.createElement('ul');
+                    ul.className = 'space-y-4';
+                    for (const studentId in students) {
+                        const student = students[studentId];
+                        const li = document.createElement('li');
+                        li.className = 'p-4 bg-gray-700 rounded-lg shadow';
+                        li.innerHTML = `
+                            <h3 class="text-xl font-bold text-orange-400 mb-2">${student.name}</h3>
+                            <p class="text-gray-300">Notas en ${currentUserData.subject}: ${student.grades[currentUserData.subject] || 'N/A'}</p>
+                        `;
+                        ul.appendChild(li);
+                    }
+                    professorGradesContent.appendChild(ul);
+                } else {
+                    professorGradesContent.innerHTML = `<p class="text-center text-gray-400">No tienes estudiantes asignados.</p>`;
+                }
+            } else {
+                professorGradesContent.innerHTML = `<p class="text-center text-gray-400">No hay datos de estudiantes disponibles.</p>`;
+            }
+        }
+
+        /**
+         * Displays the God Admin Panel and renders all users.
+         */
+        async function showGodAdminPanel() {
+            hideAllSections();
+            godAdminPanelSection.classList.remove('hidden');
+            await renderUserList();
+        }
+
+        /**
+         * Renders all user accounts in the God Admin Panel.
+         */
+        async function renderUserList() {
+            userListContainer.innerHTML = '<p class="text-gray-300 text-center">Cargando usuarios...</p>';
+            try {
+                const usersCollectionRef = firestoreCollection(db, `artifacts/${window.appId}/users/${getFirebaseUserId()}/user_data`);
+                const q = firestoreQuery(usersCollectionRef);
+                const querySnapshot = await firestoreGetDocs(q);
+
+                if (querySnapshot.empty) {
+                    userListContainer.innerHTML = '<p class="text-gray-300 text-center">No hay usuarios registrados.</p>';
+                    return;
+                }
+
+                const table = document.createElement('table');
+                table.className = 'schedule-table mt-4'; // Reusing schedule-table styles
+                table.innerHTML = `
+                    <thead>
+                        <tr>
+                            <th>Email</th>
+                            <th>Nombre Completo</th>
+                            <th>Cédula</th>
+                            <th>Tipo</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                `;
+                const tbody = table.querySelector('tbody');
+
+                querySnapshot.forEach(docSnap => {
+                    const userData = docSnap.data();
+                    const row = document.createElement('tr');
+                    row.innerHTML = `
+                        <td>${userData.email || 'N/A'}</td>
+                        <td>${userData.fullName || 'N/A'}</td>
+                        <td>${userData.cedula || 'N/A'}</td>
+                        <td>${userData.type || 'N/A'}</td>
+                        <td>
+                            <button data-id="${docSnap.id}" class="edit-user-btn bg-blue-600 hover:bg-blue-700 text-white py-1 px-3 rounded-md text-sm mr-2">Editar</button>
+                            <button data-id="${docSnap.id}" class="delete-user-btn bg-red-600 hover:bg-red-700 text-white py-1 px-3 rounded-md text-sm">Eliminar</button>
+                        </td>
+                    `;
+                    tbody.appendChild(row);
+                });
+
+                userListContainer.innerHTML = ''; // Clear loading message
+                userListContainer.appendChild(table);
+
+                // Add event listeners for edit and delete buttons
+                userListContainer.querySelectorAll('.edit-user-btn').forEach(button => {
+                    button.onclick = (e) => editUser(e.target.dataset.id);
+                });
+                userListContainer.querySelectorAll('.delete-user-btn').forEach(button => {
+                    button.onclick = (e) => deleteUser(e.target.dataset.id);
+                });
+
+            } catch (error) {
+                console.error("Error fetching users for admin panel:", error);
+                userListContainer.innerHTML = '<p class="text-red-400 text-center">Error al cargar usuarios.</p>';
+            }
+        }
+
+        /**
+         * Placeholder for user editing functionality.
+         * @param {string} userIdToEdit - The ID of the user to edit.
+         */
+        async function editUser(userIdToEdit) {
+            window.showCustomAlert(`Funcionalidad de edición para el usuario: ${userIdToEdit} (No implementado en esta versión)`, 'info');
+            // Implement actual edit logic here (e.g., open a modal with user data)
+        }
+
+        /**
+         * Deletes a user account from Firestore.
+         * @param {string} userIdToDelete - The ID of the account to delete.
+         */
+        async function deleteUser(userIdToDelete) {
+            window.showCustomAlert(
+                `¿Estás seguro de que quieres eliminar al usuario con ID: ${userIdToDelete}?`,
+                'info',
+                [
+                    { text: 'Cancelar', action: null },
+                    { text: 'Eliminar', action: async () => {
+                        try {
+                            // In a real application, you would also delete the user from Firebase Authentication.
+                            // This would typically require re-authenticating the admin or using a backend service.
+                            // For this example, we'll only delete from the Firestore 'user_data' collection.
+                            const userDocRef = firestoreDoc(firestoreCollection(db, `artifacts/${window.appId}/users/${getFirebaseUserId()}/user_data`), userIdToDelete);
+                            await firestoreDeleteDoc(userDocRef);
+                            window.showCustomAlert('Usuario eliminado de Firestore correctamente.', 'success');
+                            renderUserList(); // Re-render the list
+                        } catch (error) {
+                            console.error("Error deleting user:", error);
+                            window.showCustomAlert(`Error al eliminar usuario: ${error.message}`, 'error');
+                        }
+                    }}
+                ]
+            );
+        }
+
+        // --- Event Listeners ---
+        /**
+         * Initializes all page-level event listeners.
+         * This function is called after Firebase authentication is ready.
+         */
+        window.initializePageListeners = () => {
+            // Main Navigation Links
+            updateMainNavBar('loggedOut'); // Set initial navigation state
+
+            // Login Form Submission
+            loginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const email = emailInput.value;
+                const password = passwordInput.value;
+                clearMessage(loginMessage);
+
+                if (!email || !password) {
+                    showMessage(loginMessage, 'Por favor, ingresa tu Gmail y contraseña.', 'error');
+                    return;
+                }
+
+                try {
+                    const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                    const user = userCredential.user;
+                    // Fetch user data from Firestore using the Firebase Auth UID
+                    const userData = await fetchUserData(user.uid);
+
+                    if (userData) {
+                        showMessage(loginMessage, 'Inicio de sesión exitoso.', 'success');
+                        showLoggedInContent(userData);
+                    } else {
+                        showMessage(loginMessage, 'Usuario no encontrado en la base de datos.', 'error');
+                        // Optionally, sign out the user if Firestore data is missing
+                        await auth.signOut();
+                    }
+                } catch (error) {
+                    console.error("Login failed:", error);
+                    let errorMessage = 'Error al iniciar sesión. Verifica tu Gmail y contraseña.';
+                    if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password' || error.code === 'auth/invalid-credential') {
+                        errorMessage = 'Gmail o contraseña incorrectos.';
+                    } else if (error.code === 'auth/invalid-email') {
+                        errorMessage = 'El formato del Gmail es inválido.';
+                    }
+                    showMessage(loginMessage, errorMessage, 'error');
+                }
+            });
+
+            // God Admin Code Form Submission
+            godAdminCodeForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const code = godAdminCodeInput.value;
+                clearMessage(godAdminCodeMessage);
+
+                if (code === 'cenit2024') { // Example master code
+                    showMessage(godAdminCodeMessage, 'Código correcto. Accediendo al login de Administrador Maestro.', 'success');
+                    hideAllSections();
+                    godAdminLoginSection.classList.remove('hidden');
+                } else {
+                    showMessage(godAdminCodeMessage, 'Código incorrecto.', 'error');
+                }
+            });
+
+            // God Admin Login Form Submission
+            godAdminLoginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const email = godAdminEmailInput.value; // Use email for GodAdmin login
+                const password = godAdminPasswordInput.value;
+                clearMessage(godAdminLoginMessage);
+
+                // Use the godadmin email from defaultValidUsers for login
+                const godAdminEmail = 'godadmin@cenit.com';
+                const godAdminPassword = 'godpass'; // Directly use the default password
+
+                if (email === godAdminEmail && password === godAdminPassword) {
+                     try {
+                        const userCredential = await signInWithEmailAndPassword(auth, email, password);
+                        const user = userCredential.user;
+                        const userData = await fetchUserData(user.uid);
+                        if (userData && userData.type === 'god_admin') {
+                            showMessage(godAdminLoginMessage, 'Inicio de sesión GodAdmin exitoso.', 'success');
+                            showLoggedInContent(userData);
+                        } else {
+                            showMessage(godAdminLoginMessage, 'Credenciales de GodAdmin inválidas o tipo de usuario incorrecto.', 'error');
+                            await auth.signOut(); // Sign out if not a god_admin
+                        }
+                    } catch (error) {
+                        console.error("GodAdmin login failed:", error);
+                        showMessage(godAdminLoginMessage, 'Error al iniciar sesión GodAdmin. Por favor, intenta de nuevo.', 'error');
+                    }
+                } else {
+                    showMessage(godAdminLoginMessage, 'Gmail o contraseña GodAdmin incorrectos.', 'error');
+                }
+            });
+
+            // Admin Access Button (from Login)
+            document.getElementById('adminAccessBtn').onclick = () => {
+                hideAllSections();
+                adminAccessSection.classList.remove('hidden');
+                clearMessage(adminMessage);
+            };
+
+            // God Admin Access Entry Button (from Login)
+            document.getElementById('godAdminAccessEntryBtn').onclick = () => {
+                hideAllSections();
+                godAdminCodeEntrySection.classList.remove('hidden');
+                clearMessage(godAdminCodeMessage);
+            };
+
+            // Admin Password Form Submission (to access account creation)
+            adminPasswordForm.addEventListener('submit', (e) => {
+                e.preventDefault();
+                const password = adminPasswordInput.value;
+                clearMessage(adminMessage);
+
+                if (password === 'adminpass') { // Example admin password
+                    showMessage(adminMessage, 'Acceso de administrador concedido.', 'success');
+                    hideAllSections();
+                    accountCreatorSection.classList.remove('hidden');
+                } else {
+                    showMessage(adminMessage, 'Contraseña de administrador incorrecta.', 'error');
+                }
+            });
+
+            // Account Creator Form Submission
+            createAccountForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const fullName = fullNameInput.value;
+                const cedula = cedulaIdentidadInput.value;
+                const email = newAccountEmailInput.value;
+                const password = newAccountPasswordInput.value;
+                const confirmPassword = confirmNewAccountPasswordInput.value;
+                const userType = newUserTypeSelect.value;
+                const professorSubject = userType === 'professor' ? newProfessorSubjectInput.value : null;
+
+                clearMessage(createAccountMessage);
+
+                if (password !== confirmPassword) {
+                    showMessage(createAccountMessage, 'Las contraseñas no coinciden.', 'error');
+                    return;
+                }
+                if (password.length < 6) {
+                    showMessage(createAccountMessage, 'La contraseña debe tener al menos 6 caracteres.', 'error');
+                    return;
+                }
+
+                try {
+                    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                    const user = userCredential.user;
+
+                    // Store additional user data in Firestore
+                    const userRef = firestoreDoc(firestoreCollection(db, `artifacts/${window.appId}/users/${user.uid}/user_data`), user.uid);
+                    await firestoreSetDoc(userRef, {
+                        fullName: fullName,
+                        cedula: cedula,
+                        email: email, // Store email as well
+                        type: userType,
+                        subject: professorSubject,
+                        grades: {}, // Initialize empty grades
+                        schedule: [], // Initialize empty schedule
+                        students: {} // Initialize empty students for professors
+                    });
+
+                    showMessage(createAccountMessage, 'Cuenta creada exitosamente. Puedes iniciar sesión ahora.', 'success');
+                    createAccountForm.reset(); // Clear form
+                    hideAllSections();
+                    loginSection.classList.remove('hidden'); // Show login section after creation
+                } catch (error) {
+                    console.error("Error creating account:", error);
+                    let errorMessage = 'Error al crear la cuenta.';
+                    if (error.code === 'auth/email-already-in-use') {
+                        errorMessage = 'El Gmail ya está en uso. Intenta con otro.';
+                    } else if (error.code === 'auth/invalid-email') {
+                        errorMessage = 'El formato del Gmail es inválido.';
+                    } else if (error.code === 'auth/weak-password') {
+                        errorMessage = 'La contraseña es demasiado débil. Debe tener al menos 6 caracteres.';
+                    }
+                    showMessage(createAccountMessage, errorMessage, 'error');
+                }
+            });
+
+            // Toggle Professor Subject Field visibility
+            newUserTypeSelect.addEventListener('change', () => {
+                if (newUserTypeSelect.value === 'professor') {
+                    professorSubjectField.classList.remove('hidden');
+                    newProfessorSubjectInput.setAttribute('required', 'true');
+                } else {
+                    professorSubjectField.classList.add('hidden');
+                    newProfessorSubjectInput.removeAttribute('required');
+                }
+            });
+
+            // Back button listeners
+            backToLoginFromGodAdminCodeBtn.onclick = () => {
+                hideAllSections();
+                loginSection.classList.remove('hidden');
+                inicioSection.classList.remove('hidden'); // Ensure inicio is also shown
+                updateMainNavBar('loggedOut'); // Reset navigation bar
+            };
+
+            backToGodAdminCodeFromLoginBtn.onclick = () => {
+                hideAllSections();
+                godAdminCodeEntrySection.classList.remove('hidden');
+            };
+
+            backToLoginFromAdminBtn.onclick = () => {
+                hideAllSections();
+                loginSection.classList.remove('hidden');
+                inicioSection.classList.remove('hidden'); // Ensure inicio is also shown
+                updateMainNavBar('loggedOut'); // Reset navigation bar
+            };
+
+            backToLoginFromGodAdminBtn.onclick = async () => {
+                await handleLogout(); // Use the general logout function
+            };
+
+            backToMisMateriasFromProfileBtn.onclick = () => showMisMaterias();
+            backToMisMateriasFromScheduleBtn.onclick = () => showMisMaterias();
+            backToMisMateriasFromDetailedGradesBtn.onclick = () => showMisMaterias();
+            backToMisMateriasFromProfessorGradesBtn.onclick = () => showMisMaterias();
+            closeGradesSubjectSelectionModalBtn.onclick = () => showMisMaterias(); // Close grades modal and go to Mis Materias
+
+            // Profile Password Toggle
+            togglePasswordBtn.onclick = () => {
+                if (profilePassword.dataset.masked === "true") {
+                    profilePassword.value = currentUserData.password || "No disponible"; // Assuming currentUserData has a password field
+                    togglePasswordBtn.textContent = "Ocultar";
+                    profilePassword.dataset.masked = "false";
+                } else {
+                    profilePassword.value = "********";
+                    togglePasswordBtn.textContent = "Mostrar";
+                    profilePassword.dataset.masked = "true";
+                }
+            };
+
+            // Change Password functionality (Firebase Auth updatePassword)
+            changePasswordBtn.onclick = async () => {
+                const newPassword = newProfilePasswordInput.value;
+                const confirmNewPassword = confirmNewProfilePasswordInput.value;
+                clearMessage(passwordChangeMessage);
+
+                if (!newPassword || !confirmNewPassword) {
+                    showMessage(passwordChangeMessage, 'Por favor, rellena ambos campos de contraseña.', 'error');
+                    return;
+                }
+                if (newPassword !== confirmNewPassword) {
+                    showMessage(passwordChangeMessage, 'Las nuevas contraseñas no coinciden.', 'error');
+                    return;
+                }
+                if (newPassword.length < 6) {
+                    showMessage(passwordChangeMessage, 'La nueva contraseña debe tener al menos 6 caracteres.', 'error');
+                    return;
+                }
+
+                try {
+                    // Update password in Firebase Authentication
+                    await updatePassword(auth.currentUser, newPassword);
+                    
+                    // Update the password in Firestore as well for consistency if you store it there
+                    // Note: It's generally not recommended to store plain passwords in Firestore.
+                    // If you must, ensure they are hashed. For this example, we're storing the plain text.
+                    const userDocRef = firestoreDoc(firestoreCollection(db, `artifacts/${window.appId}/users/${getFirebaseUserId()}/user_data`), getFirebaseUserId());
+                    await firestoreSetDoc(userDocRef, { password: newPassword }, { merge: true }); // Merge to update only the password field
+                    currentUserData.password = newPassword; // Update global state
+
+                    showMessage(passwordChangeMessage, 'Contraseña actualizada exitosamente.', 'success');
+                    newProfilePasswordInput.value = '';
+                    confirmNewProfilePasswordInput.value = '';
+                    profilePassword.value = "********"; // Reset masked password in profile
+                    profilePassword.dataset.masked = "true";
+                    togglePasswordBtn.textContent = "Mostrar";
+                } catch (error) {
+                    console.error("Error updating password:", error);
+                    let errorMessage = 'Error al cambiar la contraseña.';
+                    if (error.code === 'auth/requires-recent-login') {
+                        errorMessage = 'Por favor, inicia sesión de nuevo para cambiar tu contraseña (por seguridad).';
+                    } else if (error.code === 'auth/weak-password') {
+                        errorMessage = 'La nueva contraseña es demasiado débil. Debe tener al menos 6 caracteres.';
+                    }
+                    showMessage(passwordChangeMessage, errorMessage, 'error');
+                }
+            };
+        };
+
+        /**
+         * Handles user logout.
+         */
+        async function handleLogout() {
+            try {
+                await auth.signOut();
+                userId = null;
+                currentUserType = null;
+                currentUsername = null;
+                currentUserData = null;
+                hideAllSections();
+                inicioSection.classList.remove('hidden');
+                loginSection.classList.remove('hidden');
+                updateMainNavBar('loggedOut');
+                window.showCustomAlert('Has cerrado sesión exitosamente.', 'success');
+            } catch (error) {
+                console.error("Error during logout:", error);
+                window.showCustomAlert('Error al cerrar sesión. Por favor, intenta de nuevo.', 'error');
+            }
+        }
+    </script>
+</body>
+</html>
